@@ -1,0 +1,342 @@
+<!doctype html>
+
+<head>
+  <meta charset="utf-8">
+  <script src="https://distill.pub/template.v1.js"></script>
+  <script type="text/javascript" id="MathJax-script" async
+    src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">
+  </script>
+  <script src=https://cdnjs.cloudflare.com/ajax/libs/seedrandom/3.0.5/seedrandom.min.js></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script type="text/front-matter">
+    title: "Mise en Place: Neural Object Placement"
+    description: "Placing objects using pre-trained vision models"
+    authors:
+    - Joel Huang: https://linkedin.com/in/joel-huang
+    affiliations:
+    - Bifrost: https://bifrost.ai
+  </script>
+</head>
+
+<body>
+  <dt-article class="centered">
+    <h1><em>Mise en Place</em>: Neural Object Placement</h1>
+    <h2>Placing objects using pre-trained vision models</h2>
+    <dt-byline></dt-byline>
+    <p>
+      As a synthetic data foundry, <a href="https://bifrost.ai">Bifrost</a> often needs to generate
+      specialized samples to reinforce distributions in synthetic datasets. Object detectors trained on
+      synthetic data, for instance, can fail on objects in rare or unrepresented contexts, like aircrafts
+      in grassy fields, or large boats in shipyards instead of on water. We're proposing a new way of
+      automatically determining suitable placement areas in large images, called <em>Mise en Place</em>.
+    </p>
+    <h2>Embedding image areas into vectors</h2>
+    <p>
+      The early layers in trained convolutional neural networks are powerful feature extractors,
+      even on smaller inputs<dt-cite key="zagoruyko2015learning"></dt-cite>. We can exploit these
+      layers to project small areas of the image into a feature embedding space, in which the embedding
+      vectors have some notion of vector similarity.
+    </p>
+    <p>
+      Here's how it works. We first split the original tile into a grid, feeding each individual cell
+      into the initial layers of a pre-trained network (which collectively act as an encoder) and
+      obtaining an embedding vector for that cell:
+    </p>
+    <div class="l-page">
+      <svg id="full"></svg>
+      <svg id="zoomed"></svg>
+      <svg id="encoder"></svg>
+      <svg id="embedding"></svg>
+    </div>
+    <p>
+      This vector acts as a latent representation of the content of the input cell.
+      We then compute the cosine similarity between each cell's embedding vector \(v_i\),
+      and every other vector \(v_j\), for every \(j \in S \setminus i\),
+      $$\text{sim}(v_i, v_j) = \frac{v_i \cdot v_j}{\lVert v_i \rVert \lVert v_j \rVert}$$
+    </p>
+    <div class="l-body">
+      <img src="assets/vecsim.svg" height="300px">
+    </div>
+    <p>
+      Evidently, similar cells produce vectors similar to each other.
+      Now, one may wonder, why bother transforming the image cell into a vector?
+      Why not simply calculate the similarity (or difference) of the input cells directly? Here's the problem.
+    </p>
+    <p>
+      Say we're contrasting two cells \(X\) and \(Y\) by taking the sum of the absolute differences between corresponding pixel values:
+      $$\text{dist}(X, Y) = \sum_{i,j} \left\lvert\,X_{i,j} - Y_{i,j}\,\right\rvert$$
+      For the pairs below, the top pair has a total difference of \(951103\), and the bottom \(490118\). What's happening here?
+    </p>
+    <div class="l-body side">
+      <img src="assets/cellsim951103.png">
+      <img src="assets/cellnotsim490118.png">
+    </div>    
+    <p>
+      Let's look at the top row. The two cells seem visually similar,
+      but the position of the diagonal feature doesn't line up perfectly.
+      This causes the absolute difference between the two images to be large, showing up as white areas in the difference map.
+      On the other hand, the bottom pair of cells don't look similar at all, and are likely from different areas
+      of the original image. But their difference remains low, since pixel values coincidentally match at the same locations,
+      resulting in a lower difference score. The usefulness of the neural network here is in its <em>translationally-invariant</em>
+      representation of the features in the image, creating embedding vectors that encode the content of each cell, rather than their literal values.
+    </p>
+    <h2>Selecting matching vectors</h2>
+    <p>
+      Now that we've scored our cells, we'll want to query a single cell, and search for all the similar cells in the image.
+      For instance, we've got this snazzy looking cell of... dirt over here.
+    </p>
+    <div class="l-body side">
+      <img src="assets/query.png">
+    </div>    
+    <p>
+      Since we have this query's similarity scores for every cell, we can rank the cells,
+      filtering those most similar to it. The naïve approach is to choose the top-\(k\) similar cells,
+      but the manual task of determining the optimal number of cells remains. An alternative is to let
+      the image speak for itself: we'll break down the distribution of scores into a
+      Gaussian mixture model<dt-cite key="duda1973pattern"></dt-cite> and select cells belonging to the
+      <span style="color: #ffa95d;">highest-scoring cluster</span>.
+    </p>
+    <div class="l-body">
+      <img src="assets/gmm.png" width="600px">
+    </div>
+    <p>Let's also confirm that the cells that produce the most similar vectors in this <span style="color: #ffa95d;">cluster</span> are visually similar in content: they are!</p>
+    <div class="l-body">
+      <img src="assets/similar.png" width="600px">
+    </div>    
+    <p>All that's left is to map the selected vectors back to the cells they came from. Again, these cells are from the highest-scoring <span style="color: #ffa95d;">cluster</span>.</p>
+    <div class="l-body">
+      <img src="assets/squares.png" width="600px">
+    </div>
+    <h2>Doing science</h2>
+    <p>
+      We might have managed to produce a visually consistent result, but we'll also need to design a performance metric,
+      which lets us perform science: tweak parameters and measure how things change.
+      From the final group of similar cells, we can recover a coarse segmentation mask,
+      compared to the original land-cover segmentation mask on the right. Though we've managed to match
+      a significant proportion of the cover, we've also let too much through.
+    </p>
+    <div class="l-body">
+      <img src="assets/coarse.png" width="600px">
+    </div>
+    <p>
+      To quantify our closeness to the original segmentation mask, we'll employ the Jaccard index<dt-cite key="jaccard1912distribution"></dt-cite>,
+      or intersection-over-union (IoU):
+      $$J(y, \hat{y}) = \frac{\lvert y \cap \hat{y} \rvert}{\lvert y \cup \hat{y} \rvert} = 0.447$$
+    </p>
+    <p>
+      That's great! Now we're able to tweak some design choices and observe how close our results are to the ground-truth
+      segmentation.
+    </p>
+    <div class="l-body side">
+      <img src="assets/iou_vs_cellsize.png">
+    </div>
+    <p>
+      For instance, we can vary the cell size, and track its effect on the Jaccard index. For each cell size, we'd
+      take the average IoU over \(5\) runs, using a random query cell each time. This hints that the optimal cell
+      size for this particular image is \(\sim 35\text{px}\) -- if we're restricting ourselves to a fixed cell size,
+      we can run this experiment over many images and try and determine the best average case.
+    </p>
+    <h2>Conclusion</h2>
+    <p>
+      At <a href="https://bifrost.ai">Bifrost</a>, we've developed <em>Mise en Place</em> to distribute objects on underrepresented areas.
+      Though this method retains and leverages the raw power of a trained neural network, it remains a relative computational featherweight,
+      since no training is involved. If computer vision research like this tickles your pickle,
+      <a href="https://www.notion.so/bifrostai/Open-Positions-at-Bifrost-c4fb0b4995bb469283a959311c09547c">we're hiring</a>!
+    </p>
+  </dt-article>
+  
+  <dt-appendix>
+  </dt-appendix>
+  
+  <script type="text/bibliography">
+    @article{jaccard1912distribution,
+      author = {Jaccard, Paul},
+      title = {THE DISTRIBUTION OF THE FLORA IN THE ALPINE ZONE},
+      journal = {New Phytologist},
+      volume = {11},
+      number = {2},
+      pages = {37-50},
+      doi = {https://doi.org/10.1111/j.1469-8137.1912.tb05611.x},
+      url = {https://nph.onlinelibrary.wiley.com/doi/abs/10.1111/j.1469-8137.1912.tb05611.x},
+      eprint = {https://nph.onlinelibrary.wiley.com/doi/pdf/10.1111/j.1469-8137.1912.tb05611.x},
+      year = {1912}
+    }
+        
+    @book{duda1973pattern,
+      title={Pattern classification and scene analysis},
+      author={Duda, Richard O and Hart, Peter E},
+      volume={3},
+      year={1973},
+      publisher={Wiley New York}
+    }
+    @article{zagoruyko2015learning,   
+      title={Learning to Compare Image Patches via Convolutional Neural Networks},   
+      author={Sergey Zagoruyko and Nikos Komodakis},   
+      year={2015},   
+      journal={arXiv preprint arXiv: Arxiv-1504.03641},
+      url={https://arxiv.org/pdf/1504.03641.pdf}
+    }
+  </script>
+
+  <script>
+    const dim = 300;
+    const gsize = 20;
+    const gdim = parseInt(dim / gsize);
+    const transitionTime = 100;
+    const imgUrl = "/Users/joel/Downloads/10452_sat.jpg"
+
+    function round(p, n) {
+      return p % n < n / 2 ? p - (p % n) : p + n - (p % n);
+    }
+
+    function getRandomColors(x, y, size) {
+      let rng = new Math.seedrandom((x+1)/(y+1)+x+y);
+      let array = Array();
+      for (let i = 0; i < size; i++) {
+        const value = parseInt(rng() * 255);
+        array.push(`rgb(${value}, ${value}, ${value})`);
+      }
+      return array;
+    }
+
+    function drawGrid(full) {
+      for (let i = 0; i < gsize - 1; i++) {
+        full.append("line")
+          .attr("x1", (i + 1) * gdim)
+          .attr("y1", 0)
+          .attr("x2", (i + 1) * gdim)
+          .attr("y2", dim)
+          .attr("stroke", "rgba(255, 255, 255, 0.4)")
+          .attr("stroke-width", 1);
+        full.append("line")
+          .attr("x1", 0)
+          .attr("y1", (i + 1) * gdim)
+          .attr("x2", dim)
+          .attr("y2", (i + 1) * gdim)
+          .attr("stroke", "rgba(255, 255, 255, 0.4)")
+          .attr("stroke-width", 1);  
+      }
+    }
+
+    function drawRects(vector, x, y) {
+      const numRects = 8;
+      const spacing = 5;
+      const totalSpacing = spacing * (numRects + 1);
+      const rectSize = parseInt((vector.attr("height") - totalSpacing) / numRects);
+      const colors = getRandomColors(x, y, numRects);
+
+      let rects = vector.selectAll("rect");
+
+      for (let i = 0; i < numRects; i++) {
+        let r = rects[i];
+        if (r === undefined) {
+          r = vector.append("rect")
+            .attr("x", spacing)
+            .attr("y", (i + 1) * spacing + i * rectSize)
+            .attr("width", rectSize)
+            .attr("height", rectSize);
+        }
+          r.attr("style", `fill: ${colors[i]}`);
+      };
+      vector.attr("width", rectSize + 2 * spacing);
+      vector.attr("height", numRects * (rectSize + spacing) + spacing);
+      return numRects;
+    }
+
+    function animateGradient(gradient) {
+      if (gradient.attr("gradientTransform") === "rotate(360)") {
+        gradient.attr("gradientTransform", "rotate(0)")
+      }
+      gradient.transition()
+        .duration(2000)
+        .ease(d3.easeQuadOut)
+        .attr("gradientTransform", "rotate(360)")
+        .on("end", animateGradient);
+    };
+
+    const full = d3.select("#full")
+      .attr("cursor", "none")
+      .attr("width", dim)
+      .attr("height", dim);
+
+    const zoomed = d3.select("#zoomed")
+      .attr("width", dim)
+      .attr("height", dim);
+
+    const img = full.append("svg:image")
+      .attr("x", 0)
+      .attr("y", 0)
+      .attr("width", dim)
+      .attr("height", dim)
+      .attr("xlink:href", imgUrl)
+
+    drawGrid(full);
+
+    const rect = full.append("rect")
+      .attr("width", gdim)
+      .attr("height", gdim)
+      .attr("style", "fill: rgba(0, 0, 0, 0.1); stroke-width: 2; stroke: rgb(255, 255, 255);");
+
+    const magnified = zoomed.append("svg:image")
+      .attr("x", 0)
+      .attr("y", 0)
+      .attr("width", dim * gsize)
+      .attr("height", dim * gsize)
+      .attr("xlink:href", imgUrl)
+      .attr("image-rendering", "pixelated");
+
+    const encoder = d3.select("#encoder")
+      .attr("width", parseInt(dim / 1.25))
+      .attr("height", dim);
+
+    const w = encoder.attr("width");
+    const h = encoder.attr("height");
+    const px = parseInt(w / 5);
+    const py = 2 * px;
+    encoder.append("polygon")
+      .attr("points", `${w-px} ${py}, ${px} ${px}, ${px} ${h-px}, ${w-px} ${h-py}`)
+      .attr("fill", "rgba(0, 0, 0, 0.1)")
+      .attr("stroke", "rgba(0, 0, 0, 0.6)")
+      .attr("stroke-width", 2);
+
+    encoder.append("text")
+      .attr("x", parseInt(w / 2))
+      .attr("y", parseInt(h / 2))
+      .style("text-anchor", "middle")
+      .style("fill", "rgba(0, 0, 0, 0.6)")
+      .style("font-size", 12)
+      .text("Pre-trained encoder");
+
+    const embedding = d3.select("#embedding")
+      .attr("height", dim);
+
+    let rects = drawRects(embedding, 0, 0);
+    embedding.append("rect")
+      .attr("id", "cont")
+      .attr("x", 0)
+      .attr("y", 0)
+      .attr("width", embedding.attr("width"))
+      .attr("height", embedding.attr("height"))
+      .attr("style", "fill: rgba(0, 0, 0, 0); stroke-width: 4; stroke: rgba(0, 0, 0, 0.6);");
+
+    full.on("mousemove", (event) => {
+      const coords = d3.pointer( event );
+      const x = round(Math.max(0, Math.min(img.attr("width") - gdim, coords[0] - parseInt(gdim / 2))), gdim);
+      const y = round(Math.max(0, Math.min(img.attr("width") - gdim, coords[1] - parseInt(gdim / 2))), gdim);
+      rect.transition()
+        .duration(transitionTime)
+        .ease(d3.easeQuadOut)
+        .attr("x", x)
+        .attr("y", y);
+
+      magnified.transition()
+        .duration(transitionTime)
+        .ease(d3.easeQuadOut)
+        .attr("x", -x * gsize)
+        .attr("y", -y * gsize);
+      
+      drawRects(embedding, x, y);
+    });
+  </script>
+</body>
+
